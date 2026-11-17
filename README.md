@@ -67,3 +67,8 @@ O app salva nome, e-mail, hash da senha e respostas do questionário no MySQL de
 A interface ainda carrega Tailwind e a fonte do Google por CDN para manter o visual do protótipo. Isso exige internet no navegador; para produção, compile e hospede os estilos localmente e revise a política de segurança de conteúdo.
 
 > **Importante:** a interface original dizia “IA” e “banco estatístico”, mas não havia integração real com modelo ou fonte de mercado. O código corrigido informa isso ao usuário e calcula apenas uma sugestão inicial local no servidor.
+
+
+## Sessão segura em HTTPS
+
+O Compose usa `COOKIE_SECURE=true` por padrão, recomendado quando a aplicação é acessada por HTTPS. Se executar somente em localhost sem TLS, defina `COOKIE_SECURE=false` explicitamente no `.env`; nunca use essa exceção em um serviço público sem TLS. O bloqueio de login é básico e mantido na memória de cada processo: ele reinicia com o serviço e não é compartilhado entre workers. Antes de publicação, configure um limitador compartilhado no proxy ou serviço dedicado; o cadastro também precisa de proteção contra abuso, e a integração MySQL precisa ser testada.

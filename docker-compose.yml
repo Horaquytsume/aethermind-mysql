@@ -23,7 +23,7 @@ services:
     environment:
       APP_ENV: production
       APP_SECRET_KEY: ${APP_SECRET_KEY:?Defina APP_SECRET_KEY no arquivo .env}
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
       MYSQL_HOST: db
       MYSQL_PORT: 3306
       MYSQL_DATABASE: ${MYSQL_DATABASE:-aethermind}

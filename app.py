@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import unicodedata
 from contextlib import contextmanager
 from datetime import timedelta
@@ -26,6 +27,39 @@ load_dotenv()
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _POOL_LOCK = threading.Lock()
+_LOGIN_FAILURES: dict[str, dict[str, float | int]] = {}
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_ATTEMPT_COUNT = 0
+_LOGIN_WINDOW_SECONDS = 600
+_LOGIN_MAX_FAILURES = 8
+_LOGIN_BLOCK_SECONDS = 600
+
+
+def _login_blocked(ip: str, now: float) -> bool:
+    entry = _LOGIN_FAILURES.get(ip)
+    if not entry:
+        return False
+    if float(entry.get("blocked_until", 0)) > now:
+        return True
+    if float(entry.get("window_until", 0)) <= now:
+        _LOGIN_FAILURES.pop(ip, None)
+    return False
+
+
+def _record_login_failure(ip: str, now: float) -> None:
+    global _LOGIN_ATTEMPT_COUNT
+    _LOGIN_ATTEMPT_COUNT += 1
+    if _LOGIN_ATTEMPT_COUNT % 100 == 0 or len(_LOGIN_FAILURES) > 10_000:
+        for key, value in list(_LOGIN_FAILURES.items()):
+            if float(value.get("blocked_until", 0)) <= now and float(value.get("window_until", 0)) <= now:
+                _LOGIN_FAILURES.pop(key, None)
+    entry = _LOGIN_FAILURES.get(ip)
+    if not entry or float(entry.get("window_until", 0)) <= now:
+        entry = {"count": 0, "window_until": now + _LOGIN_WINDOW_SECONDS, "blocked_until": 0}
+    entry["count"] = int(entry["count"]) + 1
+    if int(entry["count"]) >= _LOGIN_MAX_FAILURES:
+        entry["blocked_until"] = now + _LOGIN_BLOCK_SECONDS
+    _LOGIN_FAILURES[ip] = entry
 
 
 def _response_error(message: str, status: int):
@@ -105,10 +139,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     if not secret_key or len(str(secret_key)) < 32:
         raise RuntimeError("Defina APP_SECRET_KEY com pelo menos 32 caracteres em .env.")
     app.config["SECRET_KEY"] = secret_key
-    app.config["SESSION_COOKIE_SECURE"] = (
-        str(os.getenv("COOKIE_SECURE", "true" if os.getenv("APP_ENV") == "production" else "false")).lower()
-        in {"1", "true", "yes", "on"}
-    )
+    if not test_config or "SESSION_COOKIE_SECURE" not in test_config:
+        app.config["SESSION_COOKIE_SECURE"] = (
+            str(os.getenv("COOKIE_SECURE", "true" if os.getenv("APP_ENV") == "production" else "false")).lower()
+            in {"1", "true", "yes", "on"}
+        )
     app.logger.setLevel(logging.INFO)
 
     @app.before_request
@@ -218,6 +253,13 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         except ValueError as exc:
             return _response_error(str(exc), 400)
 
+        client_ip = request.remote_addr or "unknown"
+        now = time.time()
+        with _LOGIN_LOCK:
+            is_blocked = _login_blocked(client_ip, now)
+        if is_blocked:
+            return _response_error("Muitas tentativas. Aguarde alguns minutos e tente novamente.", 429)
+
         try:
             with db_connection(app) as connection:
                 cursor = connection.cursor(dictionary=True)
@@ -232,7 +274,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             return _response_error("Banco de dados indisponível. Tente novamente.", 503)
 
         if not user or not check_password_hash(user["password_hash"], password):
+            with _LOGIN_LOCK:
+                _record_login_failure(client_ip, now)
             return _response_error("E-mail ou senha incorretos.", 401)
+        with _LOGIN_LOCK:
+            _LOGIN_FAILURES.pop(client_ip, None)
 
         session.clear()
         session.permanent = True
